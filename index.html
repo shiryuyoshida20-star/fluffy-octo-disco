@@ -902,14 +902,20 @@ async function autoFillMissingInfo() {
 }
 
 function getLatestCover(seriesName) {
+  // 登録済みアイテムの表紙（巻数が最大のもの）
   const vols = Object.values(allItems)
     .filter(it => (it.seriesName || '') === seriesName && it.coverUrl)
-    .sort((a, b) => {
-      const na = parseFloat(a.volume) || 0;
-      const nb = parseFloat(b.volume) || 0;
-      return nb - na;
-    });
-  return vols.length ? vols[0].coverUrl : '';
+    .sort((a, b) => (parseFloat(b.volume) || 0) - (parseFloat(a.volume) || 0));
+  if (vols.length) return vols[0].coverUrl;
+  // Google Booksキャッシュから最新巻の表紙を取得
+  const cached = window._seriesVolsCache && window._seriesVolsCache[seriesName];
+  if (cached && cached.length) {
+    const latest = cached[cached.length - 1];
+    if (latest && latest.volumeInfo && latest.volumeInfo.imageLinks) {
+      return (latest.volumeInfo.imageLinks.thumbnail || '').replace('http://', 'https://');
+    }
+  }
+  return '';
 }
 
 function getLatestReleaseDate(seriesName) {
@@ -1415,67 +1421,155 @@ document.getElementById('checkNewVolBtn').addEventListener('click', () => {
   if (currentSeriesName) checkNewVolumes(currentSeriesName);
 });
 
-function openSeriesPanel(seriesName) {
-  currentSeriesName = seriesName;
-  const vols = Object.values(allItems)
-    .filter(it => (it.seriesName || '') === seriesName)
-    .sort((a,b) => {
-      const na = parseFloat(a.volume) || 0;
-      const nb = parseFloat(b.volume) || 0;
-      return na - nb || (a.releaseDate||'').localeCompare(b.releaseDate||'');
-    });
+window._seriesVolsCache = {};
 
-  const total = vols.length;
-  const purchased = vols.filter(v => v.purchased).length;
-  const today = todayStr();
-  const upcoming = vols.filter(v => v.releaseDate >= today).length;
+async function openSeriesPanel(seriesName) {
+  currentSeriesName = seriesName;
+
+  const registeredVols = Object.values(allItems).filter(it => (it.seriesName || '') === seriesName);
+  const purchased = registeredVols.filter(v => v.purchased).length;
 
   document.getElementById('seriesPanelTitle').textContent = seriesName;
   document.getElementById('checkResultSection').classList.add('hidden');
   document.getElementById('checkResultList').innerHTML = '';
+  document.getElementById('seriesStats').innerHTML = `<div class="stat-chip">読み込み中…</div>`;
+  document.getElementById('seriesVolList').innerHTML = '<div style="text-align:center;padding:20px;color:var(--ink-soft)">情報を取得中…</div>';
+
+  _panelOpenTime = Date.now();
+  document.getElementById('overlay').classList.add('open');
+  seriesPanel.classList.add('open');
+
+  // Google Booksから全巻を取得（キャッシュあれば再利用）
+  let booksVols = window._seriesVolsCache[seriesName];
+  if (!booksVols) {
+    try {
+      const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(seriesName)}&langRestrict=ja&maxResults=40&country=JP`);
+      const data = await res.json();
+      booksVols = (data.items || [])
+        .filter(item => {
+          const t = (item.volumeInfo && item.volumeInfo.title) || '';
+          return t.includes(seriesName.slice(0, Math.min(4, seriesName.length)));
+        })
+        .sort((a, b) => {
+          const va = extractVolume((a.volumeInfo && a.volumeInfo.title) || '') || 999;
+          const vb = extractVolume((b.volumeInfo && b.volumeInfo.title) || '') || 999;
+          return va - vb;
+        });
+      window._seriesVolsCache[seriesName] = booksVols;
+    } catch(e) { booksVols = []; }
+  }
+  window._currentSeriesVols = booksVols;
 
   // 最新刊の表紙をヘッダーに表示
-  const coverUrl = getLatestCover(seriesName);
+  const latestVol = booksVols.length ? booksVols[booksVols.length - 1] : null;
+  const latestCover = (latestVol && latestVol.volumeInfo && latestVol.volumeInfo.imageLinks)
+    ? (latestVol.volumeInfo.imageLinks.thumbnail || '').replace('http://', 'https://')
+    : getLatestCover(seriesName);
   const coverWrap = document.getElementById('seriesCoverWrap');
-  if (coverUrl) {
-    coverWrap.style.backgroundImage = `url('${coverUrl}')`;
+  if (latestCover) {
+    coverWrap.style.backgroundImage = `url('${latestCover}')`;
     coverWrap.style.display = 'block';
   } else {
     coverWrap.style.backgroundImage = '';
     coverWrap.style.display = 'none';
   }
+
+  // 最新刊の発売日
+  const latestPubdate = latestVol && latestVol.volumeInfo && latestVol.volumeInfo.publishedDate
+    ? parsePubdate((latestVol.volumeInfo.publishedDate || '').replace(/[/-]/g, ''))
+    : '';
+
+  // 統計
   document.getElementById('seriesStats').innerHTML = `
-    <div class="stat-chip">全 <strong>${total}</strong> 巻</div>
+    <div class="stat-chip">全 <strong>${booksVols.length || registeredVols.length}</strong> 巻</div>
+    <div class="stat-chip">登録済 <strong>${registeredVols.length}</strong> 巻</div>
     <div class="stat-chip">購入済 <strong>${purchased}</strong> 巻</div>
-    <div class="stat-chip">未購入 <strong>${total - purchased}</strong> 巻</div>
-    ${upcoming > 0 ? `<div class="stat-chip">発売前 <strong>${upcoming}</strong> 巻</div>` : ''}
+    ${latestPubdate ? `<div class="stat-chip">最新刊: <strong>${fmtDate(latestPubdate)}</strong></div>` : ''}
   `;
 
-  document.getElementById('seriesVolList').innerHTML = vols.map(v => {
-    const isUpcoming = v.releaseDate >= today;
+  const today = todayStr();
+
+  // 登録済みのマップ
+  const regByVol = {}, regByIsbn = {};
+  registeredVols.forEach(v => {
+    if (v.volume) regByVol[String(v.volume)] = v;
+    if (v.isbn) regByIsbn[v.isbn] = v;
+  });
+
+  const volsToShow = booksVols.length ? booksVols : registeredVols.sort((a, b) =>
+    (parseFloat(a.volume) || 0) - (parseFloat(b.volume) || 0)
+  ).map(v => ({ volumeInfo: {
+    title: v.title + (v.volume ? ` 第${v.volume}巻` : ''),
+    publishedDate: v.releaseDate,
+    imageLinks: v.coverUrl ? { thumbnail: v.coverUrl } : null,
+    industryIdentifiers: v.isbn ? [{ type: 'ISBN_13', identifier: v.isbn }] : [],
+    authors: v.author ? [v.author] : [],
+    publisher: v.publisher
+  }, _registeredItem: v }));
+
+  document.getElementById('seriesVolList').innerHTML = volsToShow.map((item, i) => {
+    const info = item.volumeInfo || {};
+    const reg = item._registeredItem || (() => {
+      const isbn13 = (info.industryIdentifiers || []).find(id => id.type === 'ISBN_13');
+      const isbn = isbn13 ? isbn13.identifier : '';
+      const volNum = extractVolume(info.title || '');
+      return (volNum && regByVol[String(volNum)]) || (isbn && regByIsbn[isbn]) || null;
+    })();
+    const cover = info.imageLinks
+      ? (info.imageLinks.thumbnail || '').replace('http://', 'https://')
+      : (reg && reg.coverUrl ? reg.coverUrl : '');
+    const pubdate = parsePubdate((info.publishedDate || '').replace(/[/-]/g, ''));
+    const isUpcoming = pubdate ? pubdate >= today : false;
+    const volNum = extractVolume(info.title || '');
+
     return `
       <div class="series-vol-row">
+        <div style="width:44px;height:62px;flex:none;border-radius:4px;margin-right:10px;background:var(--indigo-pale);background-size:cover;background-position:center;${cover ? `background-image:url('${cover}')` : ''}"></div>
         <div class="series-vol-info">
-          <div class="series-vol-title">${escapeHtml(v.title)}${v.volume ? `　第${escapeHtml(v.volume)}巻` : ''}</div>
+          <div class="series-vol-title">${escapeHtml(info.title || '')}</div>
           <div class="series-vol-meta">
-            ${fmtDate(v.releaseDate)}　
-            <span class="badge ${isUpcoming ? 'badge-upcoming' : 'badge-released'}">${isUpcoming ? '発売前' : '発売済'}</span>
+            ${pubdate ? fmtDate(pubdate) : '発売日不明'}
+            ${pubdate ? `&nbsp;<span class="badge ${isUpcoming ? 'badge-upcoming' : 'badge-released'}">${isUpcoming ? '発売前' : '発売済'}</span>` : ''}
           </div>
         </div>
         <div class="series-vol-actions">
-          <a class="amazon-btn" href="${buildAmazonUrl(v)}" target="_blank" rel="noopener">Amazon</a>
-          <div class="purchase-toggle ${v.purchased ? 'checked' : ''}" data-action="togglePurchased" data-id="${v.id}" style="font-size:11px;">
-            <span class="box">${v.purchased ? '✓' : ''}</span>
-          </div>
+          <a class="amazon-btn" href="${buildAmazonUrl({title: info.title || '', volume: volNum ? String(volNum) : ''})}" target="_blank" rel="noopener">Amazon</a>
+          ${reg
+            ? `<div class="purchase-toggle ${reg.purchased ? 'checked' : ''}" data-action="togglePurchased" data-id="${reg.id}" style="font-size:11px;"><span class="box">${reg.purchased ? '✓' : ''}</span></div>`
+            : `<button class="add-vol-btn" onclick="quickAddSeriesVol(${i})">追加</button>`
+          }
         </div>
       </div>
     `;
-  }).join('');
-
-  _panelOpenTime = Date.now();
-  document.getElementById('overlay').classList.add('open');
-  seriesPanel.classList.add('open');
+  }).join('') || '<div style="text-align:center;padding:20px;color:var(--ink-soft)">巻が見つかりませんでした</div>';
 }
+
+window.quickAddSeriesVol = async function(index) {
+  const item = window._currentSeriesVols && window._currentSeriesVols[index];
+  if (!item) return;
+  const info = item.volumeInfo || {};
+  const isbn13 = (info.industryIdentifiers || []).find(id => id.type === 'ISBN_13');
+  const isbn = isbn13 ? isbn13.identifier : '';
+  const cover = info.imageLinks ? (info.imageLinks.thumbnail || '').replace('http://', 'https://') : '';
+  const pubdate = parsePubdate((info.publishedDate || '').replace(/[/-]/g, ''));
+  const volNum = extractVolume(info.title || '');
+  const id = newItemId();
+  await saveItemToDb(id, {
+    title: info.title || '',
+    volume: volNum ? String(volNum) : '',
+    releaseDate: pubdate || '',
+    seriesName: currentSeriesName,
+    publisher: info.publisher || '',
+    author: (info.authors || []).join('、'),
+    isbn, isSpinoff: false, parentSeries: '',
+    spinoffVisible: true, purchased: false, syncCalendar: false,
+    note: '', coverUrl: cover, calendarEventId: null,
+    createdAt: Date.now(), updatedAt: Date.now()
+  });
+  toast(`追加しました`);
+  delete window._seriesVolsCache[currentSeriesName];
+  openSeriesPanel(currentSeriesName);
+};
 
 document.getElementById('seriesVolList').addEventListener('click', async (e) => {
   const target = e.target.closest('[data-action]');
