@@ -282,6 +282,26 @@
   .series-close-btn{
     background:none; border:none; font-size:20px; cursor:pointer; color:var(--ink-soft); padding:0 4px;
   }
+
+  /* ---------- 新刊チェック ---------- */
+  .check-btn{
+    background:var(--indigo); color:#fff; border:none; border-radius:8px;
+    padding:8px 14px; font-size:13px; font-weight:600; cursor:pointer; white-space:nowrap;
+  }
+  .check-btn:disabled{opacity:.5; cursor:default;}
+  .check-result-section{margin-top:16px; border-top:1px solid var(--line); padding-top:14px;}
+  .check-result-title{font-size:13px; font-weight:700; color:var(--ink-soft); margin:0 0 10px;}
+  .new-vol-row{
+    display:flex; align-items:center; justify-content:space-between; gap:8px;
+    background:#EAF2E8; border:1px solid #b8d9b2; border-radius:8px; padding:10px 12px; margin-bottom:8px;
+  }
+  .new-vol-info{flex:1; min-width:0;}
+  .new-vol-title{font-size:13px; font-weight:600; margin:0 0 2px; color:var(--ink);}
+  .new-vol-meta{font-size:11px; color:var(--ink-soft);}
+  .add-vol-btn{
+    background:var(--success); color:#fff; border:none; border-radius:6px;
+    font-size:12px; font-weight:700; padding:6px 10px; cursor:pointer; white-space:nowrap;
+  }
 </style>
 </head>
 <body>
@@ -436,6 +456,15 @@
     <button class="series-close-btn" id="seriesPanelClose">×</button>
   </div>
   <div class="series-stats" id="seriesStats"></div>
+  <div style="margin-bottom:14px;">
+    <button class="check-btn" id="checkNewVolBtn">📡 新刊をチェック（openBD）</button>
+  </div>
+  <div id="checkResultSection" class="hidden">
+    <div class="check-result-section">
+      <p class="check-result-title" id="checkResultTitle"></p>
+      <div id="checkResultList"></div>
+    </div>
+  </div>
   <div class="series-vol-list" id="seriesVolList"></div>
 </div>
 
@@ -990,11 +1019,154 @@ function buildAmazonUrl(item) {
   return `https://www.amazon.co.jp/s?k=${q}`;
 }
 
+/* ---------------- 巻数抽出ユーティリティ ---------------- */
+function extractVolume(title) {
+  // 「第N巻」「(N)」「N巻」「Vol.N」などから巻数を抽出
+  const patterns = [
+    /第(\d+)巻/,
+    /\((\d+)\)/,
+    /（(\d+)）/,
+    /[Vv]ol\.?\s*(\d+)/,
+    /(\d+)巻/,
+    /\s(\d+)$/
+  ];
+  for (const p of patterns) {
+    const m = title.match(p);
+    if (m) return parseInt(m[1]);
+  }
+  return null;
+}
+
+/* ---------------- openBD新刊チェック ---------------- */
+let currentSeriesName = '';
+
+async function checkNewVolumes(seriesName) {
+  const btn = document.getElementById('checkNewVolBtn');
+  const section = document.getElementById('checkResultSection');
+  const titleEl = document.getElementById('checkResultTitle');
+  const listEl = document.getElementById('checkResultList');
+
+  btn.disabled = true;
+  btn.textContent = '検索中…';
+  section.classList.add('hidden');
+  listEl.innerHTML = '';
+
+  try {
+    const res = await fetch(`https://api.openbd.jp/v1/search?title=${encodeURIComponent(seriesName)}&limit=100`);
+    const data = await res.json();
+
+    if (!data || !data.length) {
+      titleEl.textContent = 'openBDに該当する書誌情報が見つかりませんでした';
+      section.classList.remove('hidden');
+      return;
+    }
+
+    // 登録済みの巻数セット（ISBN or 巻数）
+    const registeredIsbns = new Set(
+      Object.values(allItems)
+        .filter(it => (it.seriesName || '') === seriesName && it.isbn)
+        .map(it => it.isbn)
+    );
+    const registeredVols = new Set(
+      Object.values(allItems)
+        .filter(it => (it.seriesName || '') === seriesName && it.volume)
+        .map(it => String(it.volume))
+    );
+
+    // シリーズ名に近いタイトルのみ絞り込み
+    const filtered = data.filter(book => {
+      const s = book.summary || {};
+      const t = s.title || '';
+      return t.includes(seriesName) || seriesName.includes(t.replace(/\s*第?\d+巻?.*/, '').trim());
+    });
+
+    // 未登録のものだけ
+    const newVols = filtered.filter(book => {
+      const s = book.summary || {};
+      const isbn = (s.isbn || '').replace(/-/g, '');
+      const volNum = extractVolume(s.title || '');
+      if (isbn && registeredIsbns.has(isbn)) return false;
+      if (volNum && registeredVols.has(String(volNum))) return false;
+      return true;
+    });
+
+    if (!newVols.length) {
+      titleEl.textContent = '未登録の新刊は見つかりませんでした（登録済みかopenBDに未掲載の可能性があります）';
+      section.classList.remove('hidden');
+      return;
+    }
+
+    titleEl.textContent = `${newVols.length}件の未登録巻が見つかりました`;
+    listEl.innerHTML = newVols.map((book, i) => {
+      const s = book.summary || {};
+      const pubdate = parsePubdate(s.pubdate || '');
+      return `
+        <div class="new-vol-row" id="newvol_${i}">
+          <div class="new-vol-info">
+            <div class="new-vol-title">${escapeHtml(s.title || '')}</div>
+            <div class="new-vol-meta">${s.publisher || ''}　${pubdate ? fmtDate(pubdate) : '発売日不明'}</div>
+          </div>
+          <button class="add-vol-btn" onclick="addNewVol(${i}, ${JSON.stringify(s).replace(/"/g, '&quot;')})">追加</button>
+        </div>
+      `;
+    }).join('');
+    section.classList.remove('hidden');
+
+    // 追加用データを一時保存
+    window._newVolData = newVols.map(b => b.summary || {});
+
+  } catch(e) {
+    console.error(e);
+    titleEl.textContent = '通信エラーが発生しました';
+    section.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '📡 新刊をチェック（openBD）';
+  }
+}
+
+async function addNewVol(index, summary) {
+  const s = window._newVolData ? window._newVolData[index] : summary;
+  if (!s) return;
+  const volNum = extractVolume(s.title || '');
+  const id = newItemId();
+  const item = {
+    title: s.title || '',
+    volume: volNum ? String(volNum) : '',
+    releaseDate: parsePubdate(s.pubdate || '') || '',
+    seriesName: currentSeriesName,
+    publisher: s.publisher || '',
+    author: s.author || '',
+    isbn: (s.isbn || '').replace(/-/g, ''),
+    isSpinoff: false,
+    parentSeries: '',
+    spinoffVisible: true,
+    purchased: false,
+    syncCalendar: false,
+    note: '',
+    coverUrl: s.cover || '',
+    calendarEventId: null,
+    createdAt: Date.now(),
+    updatedAt: Date.now()
+  };
+  await saveItemToDb(id, item);
+  // 追加した行を消す
+  const row = document.getElementById(`newvol_${index}`);
+  if (row) row.remove();
+  toast(`「${item.title}」を追加しました`);
+  // シリーズパネルを更新
+  openSeriesPanel(currentSeriesName);
+}
+
 /* ---------------- シリーズ詳細パネル ---------------- */
 const seriesPanel = document.getElementById('seriesPanel');
 document.getElementById('seriesPanelClose').addEventListener('click', closeSeriesPanel);
+document.getElementById('checkNewVolBtn').addEventListener('click', () => {
+  if (currentSeriesName) checkNewVolumes(currentSeriesName);
+});
 
 function openSeriesPanel(seriesName) {
+  currentSeriesName = seriesName;
   const vols = Object.values(allItems)
     .filter(it => (it.seriesName || '') === seriesName)
     .sort((a,b) => {
@@ -1009,6 +1181,8 @@ function openSeriesPanel(seriesName) {
   const upcoming = vols.filter(v => v.releaseDate >= today).length;
 
   document.getElementById('seriesPanelTitle').textContent = seriesName;
+  document.getElementById('checkResultSection').classList.add('hidden');
+  document.getElementById('checkResultList').innerHTML = '';
   document.getElementById('seriesStats').innerHTML = `
     <div class="stat-chip">全 <strong>${total}</strong> 巻</div>
     <div class="stat-chip">購入済 <strong>${purchased}</strong> 巻</div>
