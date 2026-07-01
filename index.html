@@ -1162,18 +1162,28 @@ window.applyTitleSearchResult = function(index) {
   const isbn = isbn13 ? isbn13.identifier : '';
   const cover = info.imageLinks ? (info.imageLinks.thumbnail || info.imageLinks.smallThumbnail || '') : '';
   const pubdate = info.publishedDate ? parsePubdate(info.publishedDate.replace(/\//g, '')) : '';
+  const vol = extractVolume(info.title || '');
+
+  // タイトルから巻数を除いてシリーズ名を抽出
+  const seriesName = (info.title || '')
+    .replace(/\s*第?\d+巻[^\d]*$/, '')
+    .replace(/\s*\(\d+\)[^\d]*$/, '')
+    .replace(/\s*（\d+）[^\d]*$/, '')
+    .replace(/\s*[Vv]ol\.?\s*\d+[^\d]*$/, '')
+    .replace(/\s+\d+$/, '')
+    .trim();
 
   document.getElementById('f_title').value = info.title || '';
   document.getElementById('f_isbn').value = isbn;
   document.getElementById('f_author').value = (info.authors || []).join('、');
   document.getElementById('f_publisher').value = info.publisher || '';
+  document.getElementById('f_series').value = seriesName || info.title || '';
   if (pubdate) document.getElementById('f_date').value = pubdate;
   if (cover) document.getElementById('f_isbn').dataset.cover = cover.replace('http://', 'https://');
-  const vol = extractVolume(info.title || '');
   if (vol) document.getElementById('f_volume').value = String(vol);
   document.getElementById('titleSearchResults').innerHTML = '';
   document.getElementById('f_title_search').value = '';
-  // ISBNがあればopenBDでも補完
+  // ISBNがあればopenBDでも表紙を補完
   if (isbn) {
     fetch(`https://api.openbd.jp/v1/get?isbn=${isbn}`).then(r=>r.json()).then(data=>{
       if (data && data[0] && data[0].summary) {
@@ -1182,7 +1192,7 @@ window.applyTitleSearchResult = function(index) {
       }
     }).catch(()=>{});
   }
-  toast("情報を入力しました");
+  toast("情報を入力しました。内容を確認して保存してください。");
 };
 
 document.getElementById('lookupBtn').addEventListener('click', async () => {
