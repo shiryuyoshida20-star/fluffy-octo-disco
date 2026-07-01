@@ -812,6 +812,23 @@ function getLatestCover(seriesName) {
   return vols.length ? vols[0].coverUrl : '';
 }
 
+function getLatestReleaseDate(seriesName) {
+  const vols = Object.values(allItems)
+    .filter(it => (it.seriesName || '') === seriesName && it.releaseDate)
+    .sort((a, b) => b.releaseDate.localeCompare(a.releaseDate));
+  return vols.length ? { date: vols[0].releaseDate, volume: vols[0].volume } : null;
+}
+
+// シリーズ名をonclick属性に安全に埋め込むためのグローバルマップ
+window._seriesMap = {};
+function registerSeries(key, name) {
+  window._seriesMap[key] = name;
+}
+window.openSeriesByKey = function(key) {
+  const name = window._seriesMap[key];
+  if (name) openSeriesPanel(name);
+};
+
 function renderCard(it) {
   if (it.isSpinoff && it.spinoffVisible === false) {
     return renderHiddenSpinoffRow(it);
@@ -819,7 +836,26 @@ function renderCard(it) {
   const today = todayStr();
   const isUpcoming = it.releaseDate ? it.releaseDate >= today : null;
   const coverUrl = it.seriesName ? (getLatestCover(it.seriesName) || it.coverUrl || '') : (it.coverUrl || '');
-  const onclickSeries = it.seriesName ? `onclick="openSeriesPanel('${escapeHtml(it.seriesName).replace(/'/g, "\\'")}')"` : '';
+
+  // シリーズキーをマップに登録してonclickで安全に参照
+  let onclickSeries = '';
+  if (it.seriesName) {
+    const key = 's_' + btoa(encodeURIComponent(it.seriesName)).replace(/[^a-zA-Z0-9]/g, '').slice(0, 20);
+    registerSeries(key, it.seriesName);
+    onclickSeries = `onclick="openSeriesByKey('${key}')"`;
+  }
+
+  // 最新刊の発売日（自分の発売日がなければシリーズの最新刊日付を表示）
+  let releaseDateDisplay = '';
+  if (it.releaseDate) {
+    releaseDateDisplay = `<span class="date-text">発売日: ${fmtDate(it.releaseDate)}</span>`;
+  } else if (it.seriesName) {
+    const latest = getLatestReleaseDate(it.seriesName);
+    if (latest) {
+      releaseDateDisplay = `<span class="date-text" style="color:var(--gold)">最新刊: 第${escapeHtml(latest.volume || '?')}巻 ${fmtDate(latest.date)}</span>`;
+    }
+  }
+
   return `
     <div class="card ${it.purchased ? 'purchased' : ''}" data-id="${it.id}">
       <div class="stamp-mark">購入済</div>
@@ -835,7 +871,7 @@ function renderCard(it) {
           ${it.syncCalendar ? `<span class="badge badge-cal">カレンダー連携中</span>` : ''}
         </div>
         <div class="meta-row">
-          ${it.releaseDate ? `<span class="date-text">発売日: ${fmtDate(it.releaseDate)}</span>` : ''}
+          ${releaseDateDisplay}
         </div>
         <div class="card-actions">
           <div class="purchase-toggle ${it.purchased ? 'checked' : ''}" data-action="togglePurchased" data-id="${it.id}">
