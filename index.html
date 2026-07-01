@@ -1067,6 +1067,12 @@ function openPanel(id) {
   updateCalFieldDesc();
 
   document.getElementById('deleteBtn').classList.toggle('hidden', !id);
+  // タイトル検索欄をリセット
+  const ts = document.getElementById('f_title_search');
+  if (ts) ts.value = '';
+  const tr = document.getElementById('titleSearchResults');
+  if (tr) tr.innerHTML = '';
+  _panelOpenTime = Date.now();
   overlay.classList.add('open');
   panel.classList.add('open');
 }
@@ -1084,7 +1090,10 @@ function isOn(elId) {
 
 document.getElementById('fabAdd').addEventListener('click', () => openPanel(null));
 document.getElementById('cancelBtn').addEventListener('click', closePanel);
-overlay.addEventListener('click', () => {
+let _panelOpenTime = 0;
+
+overlay.addEventListener('click', (e) => {
+  if (Date.now() - _panelOpenTime < 400) return; // ゴーストクリック防止
   closePanel();
   closeSeriesPanel();
 });
@@ -1453,6 +1462,7 @@ function openSeriesPanel(seriesName) {
     `;
   }).join('');
 
+  _panelOpenTime = Date.now();
   document.getElementById('overlay').classList.add('open');
   seriesPanel.classList.add('open');
 }
