@@ -308,6 +308,20 @@
     background:var(--success); color:#fff; border:none; border-radius:6px;
     font-size:12px; font-weight:700; padding:6px 10px; cursor:pointer; white-space:nowrap;
   }
+
+  /* ---------- タイトル検索結果 ---------- */
+  .title-search-result{
+    display:flex; align-items:center; gap:10px; padding:8px 10px; margin-bottom:6px;
+    background:var(--paper-card); border:1px solid var(--line); border-radius:8px; cursor:pointer;
+  }
+  .title-search-result:hover{border-color:var(--indigo); background:var(--indigo-pale);}
+  .title-search-cover{
+    width:36px; height:50px; flex:none; border-radius:4px; background:var(--indigo-pale);
+    background-size:cover; background-position:center;
+  }
+  .title-search-info{flex:1; min-width:0;}
+  .title-search-name{font-size:13px; font-weight:600; margin:0 0 2px; color:var(--ink);}
+  .title-search-meta{font-size:11px; color:var(--ink-soft);}
 </style>
 </head>
 <body>
@@ -362,6 +376,15 @@
 <div class="panel" id="panel">
   <div class="panel-handle"></div>
   <h2 id="panelTitle">新規登録</h2>
+
+  <div class="field">
+    <label>タイトルで検索（openBD）</label>
+    <div class="isbn-row">
+      <input type="text" id="f_title_search" placeholder="タイトル名を入力して検索…">
+      <button class="lookup-btn" id="titleSearchBtn">検索</button>
+    </div>
+    <div id="titleSearchResults" style="margin-top:6px;"></div>
+  </div>
 
   <div class="field">
     <label>ISBN（自動入力 / openBD）</label>
@@ -1086,6 +1109,62 @@ document.getElementById('purchasedFieldSwitch').addEventListener('click', e => {
 document.getElementById('calFieldSwitch').addEventListener('click', e => {
   setSwitch('calFieldSwitch', !e.target.classList.contains('on'));
 });
+
+document.getElementById('titleSearchBtn').addEventListener('click', async () => {
+  const query = document.getElementById('f_title_search').value.trim();
+  if (!query) { toast("検索キーワードを入力してください"); return; }
+  const btn = document.getElementById('titleSearchBtn');
+  const resultsEl = document.getElementById('titleSearchResults');
+  btn.textContent = '検索中…';
+  btn.disabled = true;
+  resultsEl.innerHTML = '';
+  try {
+    const res = await fetch(`https://api.openbd.jp/v1/search?title=${encodeURIComponent(query)}&limit=20`);
+    const data = await res.json();
+    if (!data || !data.length) {
+      resultsEl.innerHTML = `<p style="font-size:12px;color:var(--ink-soft)">見つかりませんでした。ISBNで検索するか手入力してください。</p>`;
+      return;
+    }
+    resultsEl.innerHTML = data.slice(0, 10).map((book, i) => {
+      const s = book.summary || {};
+      const pubdate = parsePubdate(s.pubdate || '');
+      return `
+        <div class="title-search-result" onclick="applyTitleSearchResult(${i})">
+          <div class="title-search-cover" style="${s.cover ? `background-image:url('${s.cover}')` : ''}"></div>
+          <div class="title-search-info">
+            <div class="title-search-name">${escapeHtml(s.title || '')}</div>
+            <div class="title-search-meta">${escapeHtml(s.author || '')}　${escapeHtml(s.publisher || '')}　${pubdate ? fmtDate(pubdate) : ''}</div>
+          </div>
+        </div>
+      `;
+    }).join('');
+    window._titleSearchData = data.slice(0, 10).map(b => b.summary || {});
+  } catch(e) {
+    resultsEl.innerHTML = `<p style="font-size:12px;color:var(--stamp)">通信エラーが発生しました</p>`;
+  } finally {
+    btn.textContent = '検索';
+    btn.disabled = false;
+  }
+});
+
+window.applyTitleSearchResult = function(index) {
+  const s = window._titleSearchData && window._titleSearchData[index];
+  if (!s) return;
+  document.getElementById('f_title').value = s.title || '';
+  document.getElementById('f_isbn').value = (s.isbn || '').replace(/-/g, '');
+  document.getElementById('f_author').value = s.author || '';
+  document.getElementById('f_publisher').value = s.publisher || '';
+  const d = parsePubdate(s.pubdate || '');
+  if (d) document.getElementById('f_date').value = d;
+  if (s.cover) document.getElementById('f_isbn').dataset.cover = s.cover;
+  // 巻数も抽出
+  const vol = extractVolume(s.title || '');
+  if (vol) document.getElementById('f_volume').value = String(vol);
+  // 検索結果を閉じる
+  document.getElementById('titleSearchResults').innerHTML = '';
+  document.getElementById('f_title_search').value = '';
+  toast("情報を入力しました");
+};
 
 document.getElementById('lookupBtn').addEventListener('click', async () => {
   const isbn = document.getElementById('f_isbn').value;
