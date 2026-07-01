@@ -799,6 +799,71 @@ function render() {
     html = list.map(renderCard).join('');
   }
   container.innerHTML = html;
+  // 表紙・発売日が未取得のアイテムをバックグラウンドで補完
+  autoFillMissingInfo();
+}
+
+const _autoFillInProgress = new Set();
+
+async function autoFillMissingInfo() {
+  const items = Object.entries(allItems);
+  for (const [id, it] of items) {
+    if (_autoFillInProgress.has(id)) continue;
+    const needsCover = !it.coverUrl;
+    const needsDate = !it.releaseDate;
+    if (!needsCover && !needsDate) continue;
+
+    _autoFillInProgress.add(id);
+    try {
+      let updated = false;
+      // ISBNがあればそちらを優先
+      if (it.isbn) {
+        const res = await fetch(`https://api.openbd.jp/v1/get?isbn=${it.isbn}`);
+        const data = await res.json();
+        if (data && data[0] && data[0].summary) {
+          const s = data[0].summary;
+          if (needsCover && s.cover) { it.coverUrl = s.cover; updated = true; }
+          if (needsDate && s.pubdate) {
+            const d = parsePubdate(s.pubdate);
+            if (d) { it.releaseDate = d; updated = true; }
+          }
+        }
+      }
+      // ISBNなし or まだ足りない場合はタイトル検索
+      if ((needsCover && !it.coverUrl) || (needsDate && !it.releaseDate)) {
+        const searchTitle = (it.seriesName || it.title || '').trim();
+        if (!searchTitle) continue;
+        const res = await fetch(`https://api.openbd.jp/v1/search?title=${encodeURIComponent(searchTitle)}&limit=50`);
+        const data = await res.json();
+        if (data && data.length) {
+          // 巻数が最大のものを最新刊とみなす
+          const sorted = data
+            .filter(b => b.summary && b.summary.title && b.summary.title.includes(searchTitle.slice(0, 4)))
+            .sort((a, b) => {
+              const va = extractVolume(a.summary.title || '') || 0;
+              const vb = extractVolume(b.summary.title || '') || 0;
+              return vb - va;
+            });
+          if (sorted.length) {
+            const latest = sorted[0].summary;
+            if (needsCover && !it.coverUrl && latest.cover) { it.coverUrl = latest.cover; updated = true; }
+            if (needsDate && !it.releaseDate && latest.pubdate) {
+              const d = parsePubdate(latest.pubdate);
+              if (d) { it.releaseDate = d; updated = true; }
+            }
+          }
+        }
+      }
+      if (updated) {
+        it.updatedAt = Date.now();
+        await saveItemToDb(id, it);
+      }
+    } catch(e) {
+      console.warn('autoFill失敗:', id, e);
+    } finally {
+      _autoFillInProgress.delete(id);
+    }
+  }
 }
 
 function getLatestCover(seriesName) {
