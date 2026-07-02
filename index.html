@@ -378,9 +378,9 @@
   <h2 id="panelTitle">新規登録</h2>
 
   <div class="field">
-    <label>タイトルで検索（openBD）</label>
+    <label>タイトルで検索（書名を入力してください）</label>
     <div class="isbn-row">
-      <input type="text" id="f_title_search" placeholder="タイトル名を入力して検索…">
+      <input type="text" id="f_title_search" placeholder="例: エクソシストは堕とせない">
       <button class="lookup-btn" id="titleSearchBtn">検索</button>
     </div>
     <div id="titleSearchResults" style="margin-top:6px;"></div>
@@ -425,6 +425,11 @@
       <label>著者</label>
       <input type="text" id="f_author" placeholder="著者">
     </div>
+  </div>
+
+  <div class="field">
+    <label>表紙画像URL（AmazonなどのURL）</label>
+    <input type="text" id="f_cover_url" placeholder="https://... （省略可）">
   </div>
 
   <div class="toggle-field">
@@ -652,26 +657,43 @@ async function lookupISBN(isbnRaw) {
   const statusEl = document.getElementById('lookupStatus');
   statusEl.textContent = "検索中…";
   try {
+    // まずopenBDで検索
     const res = await fetch(`https://api.openbd.jp/v1/get?isbn=${isbn}`);
     const data = await res.json();
-    if (!data || !data[0]) {
-      statusEl.textContent = "該当する書誌情報が見つかりませんでした（手入力してください）";
-      return null;
+    if (data && data[0] && data[0].summary) {
+      const s = data[0].summary;
+      statusEl.textContent = "書誌情報を取得しました（openBD）";
+      return {
+        title: s.title || "",
+        author: s.author || "",
+        publisher: s.publisher || "",
+        pubdate: s.pubdate || "",
+        cover: s.cover || ""
+      };
     }
-    const s = data[0].summary || {};
-    statusEl.textContent = "書誌情報を取得しました";
-    return {
-      title: s.title || "",
-      author: s.author || "",
-      publisher: s.publisher || "",
-      pubdate: s.pubdate || "",
-      cover: s.cover || ""
-    };
-  } catch (e) {
-    console.error(e);
-    statusEl.textContent = "通信エラーが発生しました";
-    return null;
-  }
+  } catch(e) {}
+
+  // openBDになければGoogle Booksで検索
+  try {
+    statusEl.textContent = "openBDにないためGoogle Booksで検索中…";
+    const res2 = await fetch(`https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn}&country=JP`);
+    const data2 = await res2.json();
+    if (data2.items && data2.items.length) {
+      const info = data2.items[0].volumeInfo || {};
+      const cover = info.imageLinks ? (info.imageLinks.thumbnail || info.imageLinks.smallThumbnail || '') : '';
+      statusEl.textContent = "書誌情報を取得しました（Google Books）";
+      return {
+        title: info.title || "",
+        author: (info.authors || []).join('、'),
+        publisher: info.publisher || "",
+        pubdate: (info.publishedDate || '').replace(/[/-]/g, ''),
+        cover: cover.replace('http://', 'https://')
+      };
+    }
+  } catch(e) {}
+
+  statusEl.textContent = "該当する書誌情報が見つかりませんでした（手入力してください）";
+  return null;
 }
 function parsePubdate(pubdate) {
   // openBDのpubdateは "20240115" "202401" "2024" などゆらぎがある
@@ -864,11 +886,19 @@ async function autoFillMissingInfo() {
         const searchTitle = (it.seriesName || it.title || '').trim();
         if (searchTitle) {
           try {
-            const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(searchTitle)}&langRestrict=ja&maxResults=10&country=JP`);
-            const data = await res.json();
-            if (data.items && data.items.length) {
+            // 複数クエリを試みる
+            let gbItems = [];
+            const r1 = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(searchTitle)}&langRestrict=ja&maxResults=20&country=JP`);
+            const d1 = await r1.json();
+            gbItems = d1.items || [];
+            if (!gbItems.length) {
+              const r2 = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(searchTitle)}&maxResults=20&country=JP`);
+              const d2 = await r2.json();
+              gbItems = d2.items || [];
+            }
+            if (gbItems.length) {
               // 巻数が最大のもの（最新刊）を選ぶ
-              const candidates = data.items.filter(b => b.volumeInfo && b.volumeInfo.title);
+              const candidates = gbItems.filter(b => b.volumeInfo && b.volumeInfo.title);
               candidates.sort((a, b) => {
                 const va = extractVolume(a.volumeInfo.title) || 0;
                 const vb = extractVolume(b.volumeInfo.title) || 0;
@@ -1060,6 +1090,7 @@ function openPanel(id) {
   document.getElementById('f_series').value = it ? it.seriesName || '' : '';
   document.getElementById('f_publisher').value = it ? it.publisher || '' : '';
   document.getElementById('f_author').value = it ? it.author || '' : '';
+  document.getElementById('f_cover_url').value = it ? it.coverUrl || '' : '';
   document.getElementById('f_parent').value = it ? it.parentSeries || '' : '';
   document.getElementById('f_note').value = it ? it.note || '' : '';
   document.getElementById('lookupStatus').textContent = '';
@@ -1122,43 +1153,141 @@ document.getElementById('calFieldSwitch').addEventListener('click', e => {
 
 document.getElementById('titleSearchBtn').addEventListener('click', async () => {
   const query = document.getElementById('f_title_search').value.trim();
-  if (!query) { toast("検索キーワードを入力してください"); return; }
+  if (!query) { toast("タイトルを入力してください"); return; }
   const btn = document.getElementById('titleSearchBtn');
   const resultsEl = document.getElementById('titleSearchResults');
   btn.textContent = '検索中…';
   btn.disabled = true;
   resultsEl.innerHTML = '';
+
+  // ISBNっぽい場合はISBN検索に転送
+  const isbnCandidate = query.replace(/[^0-9Xx]/g, '');
+  if (isbnCandidate.length === 13 || isbnCandidate.length === 10) {
+    document.getElementById('f_isbn').value = isbnCandidate;
+    btn.textContent = '検索';
+    btn.disabled = false;
+    document.getElementById('lookupBtn').click();
+    return;
+  }
+
   try {
-    const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(query)}&langRestrict=ja&maxResults=10&country=JP`);
-    const data = await res.json();
-    if (!data.items || !data.items.length) {
-      resultsEl.innerHTML = `<p style="font-size:12px;color:var(--ink-soft)">見つかりませんでした。ISBNで検索するか手入力してください。</p>`;
+    // 検索1: Google Books（日本語）
+    let items = [];
+    try {
+      const r1 = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(query)}&langRestrict=ja&maxResults=10&country=JP`);
+      const d1 = await r1.json();
+      items = d1.items || [];
+    } catch(e) {}
+
+    // 検索2: Google Books（言語制限なし）
+    if (!items.length) {
+      try {
+        const r2 = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(query)}&maxResults=10&country=JP`);
+        const d2 = await r2.json();
+        items = d2.items || [];
+      } catch(e) {}
+    }
+
+    if (items.length) {
+      window._titleSearchData = items;
+      window._titleSearchSource = 'google';
+      renderTitleSearchResults(items, resultsEl);
       return;
     }
-    window._titleSearchData = data.items;
-    resultsEl.innerHTML = data.items.map((item, i) => {
-      const info = item.volumeInfo || {};
-      const cover = info.imageLinks ? (info.imageLinks.thumbnail || info.imageLinks.smallThumbnail || '') : '';
-      const author = (info.authors || []).join('、');
-      const publisher = info.publisher || '';
-      const date = info.publishedDate ? info.publishedDate.slice(0,10).replace(/-/g, '/') : '';
-      return `
-        <div class="title-search-result" onclick="applyTitleSearchResult(${i})">
-          <div class="title-search-cover" style="${cover ? `background-image:url('${cover}')` : ''}"></div>
-          <div class="title-search-info">
-            <div class="title-search-name">${escapeHtml(info.title || '')}</div>
-            <div class="title-search-meta">${escapeHtml(author)}　${escapeHtml(publisher)}　${date}</div>
-          </div>
-        </div>
-      `;
-    }).join('');
-  } catch(e) {
-    resultsEl.innerHTML = `<p style="font-size:12px;color:var(--stamp)">通信エラーが発生しました</p>`;
+
+    // 検索3: NDL（国立国会図書館）- CORSプロキシ経由
+    resultsEl.innerHTML = `<p style="font-size:12px;color:var(--ink-soft)">国立国会図書館でも検索中…</p>`;
+    try {
+      const ndlQuery = `https://iss.ndl.go.jp/api/sru?operation=searchRetrieve&query=title+%3D+%22${encodeURIComponent(query)}%22+AND+mediatype+%3D+%221%22&maximumRecords=20`;
+      const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(ndlQuery)}`;
+      const r3 = await fetch(proxyUrl);
+      const text = await r3.text();
+      const xml = new DOMParser().parseFromString(text, 'text/xml');
+      const records = Array.from(xml.querySelectorAll('record'));
+      const ndlItems = records.map(rec => {
+        const get = (tag) => {
+          const el = Array.from(rec.getElementsByTagName('*')).find(e => e.localName === tag);
+          return el ? el.textContent.trim() : '';
+        };
+        const title = get('title');
+        const creator = get('creator');
+        const publisher = get('publisher');
+        const date = get('date');
+        const isbn = Array.from(rec.getElementsByTagName('*'))
+          .filter(e => e.localName === 'identifier')
+          .map(e => e.textContent.trim().replace(/-/g, ''))
+          .find(s => /^[0-9]{13}$/.test(s)) || '';
+        return { title, creator, publisher, date, isbn };
+      }).filter(it => it.title);
+
+      if (ndlItems.length) {
+        window._titleSearchData = ndlItems;
+        window._titleSearchSource = 'ndl';
+        resultsEl.innerHTML = '';
+        renderNDLResults(ndlItems, resultsEl);
+        return;
+      }
+    } catch(e) { console.warn('NDL:', e); }
+
+    resultsEl.innerHTML = `<p style="font-size:12px;color:var(--ink-soft)">見つかりませんでした。タイトルを変えて再検索するか、直接入力してください。</p>`;
   } finally {
     btn.textContent = '検索';
     btn.disabled = false;
   }
 });
+
+function renderTitleSearchResults(items, resultsEl) {
+  resultsEl.innerHTML = items.map((item, i) => {
+    const info = item.volumeInfo || {};
+    const cover = info.imageLinks ? (info.imageLinks.thumbnail || info.imageLinks.smallThumbnail || '') : '';
+    const author = (info.authors || []).join('、');
+    const date = info.publishedDate ? info.publishedDate.slice(0,10).replace(/-/g, '/') : '';
+    return `
+      <div class="title-search-result" onclick="applyTitleSearchResult(${i})">
+        <div class="title-search-cover" style="${cover ? `background-image:url('${cover}')` : ''}"></div>
+        <div class="title-search-info">
+          <div class="title-search-name">${escapeHtml(info.title || '')}</div>
+          <div class="title-search-meta">${escapeHtml(author)}　${escapeHtml(info.publisher || '')}　${date}</div>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderNDLResults(items, resultsEl) {
+  resultsEl.innerHTML = `<p style="font-size:11px;color:var(--ink-soft);margin:0 0 6px;">国立国会図書館の結果</p>` + items.map((it, i) => `
+    <div class="title-search-result" onclick="applyNDLResult(${i})">
+      <div class="title-search-cover"></div>
+      <div class="title-search-info">
+        <div class="title-search-name">${escapeHtml(it.title)}</div>
+        <div class="title-search-meta">${escapeHtml(it.creator)}　${escapeHtml(it.publisher)}　${it.date}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+window.applyNDLResult = async function(index) {
+  const it = window._titleSearchData && window._titleSearchData[index];
+  if (!it) return;
+  document.getElementById('f_title').value = it.title;
+  document.getElementById('f_author').value = it.creator;
+  document.getElementById('f_publisher').value = it.publisher;
+  if (it.date) document.getElementById('f_date').value = parsePubdate(it.date.replace(/[/-]/g, ''));
+  // シリーズ名を抽出
+  const seriesName = it.title.replace(/\s*第?\d+巻.*$/, '').replace(/\s*\(\d+\).*$/, '').replace(/\s*（\d+）.*$/, '').trim();
+  document.getElementById('f_series').value = seriesName || it.title;
+  const vol = extractVolume(it.title);
+  if (vol) document.getElementById('f_volume').value = String(vol);
+  // ISBNがあればopenBDで表紙を取得
+  if (it.isbn) {
+    document.getElementById('f_isbn').value = it.isbn;
+    const info = await lookupISBN(it.isbn);
+    if (info && info.cover) document.getElementById('f_isbn').dataset.cover = info.cover;
+  }
+  document.getElementById('titleSearchResults').innerHTML = '';
+  document.getElementById('f_title_search').value = '';
+  toast("情報を入力しました。内容を確認して保存してください。");
+};
 
 window.applyTitleSearchResult = function(index) {
   const item = window._titleSearchData && window._titleSearchData[index];
@@ -1185,7 +1314,10 @@ window.applyTitleSearchResult = function(index) {
   document.getElementById('f_publisher').value = info.publisher || '';
   document.getElementById('f_series').value = seriesName || info.title || '';
   if (pubdate) document.getElementById('f_date').value = pubdate;
-  if (cover) document.getElementById('f_isbn').dataset.cover = cover.replace('http://', 'https://');
+  if (cover) {
+    document.getElementById('f_isbn').dataset.cover = cover.replace('http://', 'https://');
+    document.getElementById('f_cover_url').value = cover.replace('http://', 'https://');
+  }
   if (vol) document.getElementById('f_volume').value = String(vol);
   document.getElementById('titleSearchResults').innerHTML = '';
   document.getElementById('f_title_search').value = '';
@@ -1236,7 +1368,7 @@ document.getElementById('saveBtn').addEventListener('click', async () => {
     purchased: isOn('purchasedFieldSwitch'),
     syncCalendar: isOn('calFieldSwitch'),
     note: document.getElementById('f_note').value.trim(),
-    coverUrl: document.getElementById('f_isbn').dataset.cover || (existing && existing.coverUrl) || '',
+    coverUrl: document.getElementById('f_cover_url').value.trim() || document.getElementById('f_isbn').dataset.cover || (existing && existing.coverUrl) || '',
     calendarEventId: existing ? existing.calendarEventId || null : null,
     createdAt: existing && existing.createdAt ? existing.createdAt : Date.now(),
     updatedAt: Date.now()
@@ -1443,18 +1575,46 @@ async function openSeriesPanel(seriesName) {
   let booksVols = window._seriesVolsCache[seriesName];
   if (!booksVols) {
     try {
-      const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(seriesName)}&langRestrict=ja&maxResults=40&country=JP`);
-      const data = await res.json();
-      booksVols = (data.items || [])
+      // 複数の検索戦略を試みる
+      let allItems_gb = [];
+
+      // 戦略1: タイトルそのまま
+      const res1 = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(seriesName)}&langRestrict=ja&maxResults=40&country=JP`);
+      const data1 = await res1.json();
+      allItems_gb = data1.items || [];
+
+      // 戦略2: 結果が少ない場合はマンガキーワードを追加
+      if (allItems_gb.length < 3) {
+        const res2 = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(seriesName + ' マンガ')}&langRestrict=ja&maxResults=20&country=JP`);
+        const data2 = await res2.json();
+        allItems_gb = [...allItems_gb, ...(data2.items || [])];
+      }
+
+      // タイトルの最初の2文字でフィルタ（緩め）
+      const prefix = seriesName.slice(0, Math.min(2, seriesName.length));
+      let filtered = allItems_gb.filter(item => {
+        const t = (item.volumeInfo && item.volumeInfo.title) || '';
+        return t.includes(prefix);
+      });
+
+      // フィルタで0件の場合はフィルタなしで全件使用
+      if (!filtered.length) filtered = allItems_gb;
+
+      // 巻数順にソート、重複除去
+      const seen = new Set();
+      booksVols = filtered
         .filter(item => {
           const t = (item.volumeInfo && item.volumeInfo.title) || '';
-          return t.includes(seriesName.slice(0, Math.min(4, seriesName.length)));
+          if (seen.has(t)) return false;
+          seen.add(t);
+          return true;
         })
         .sort((a, b) => {
           const va = extractVolume((a.volumeInfo && a.volumeInfo.title) || '') || 999;
           const vb = extractVolume((b.volumeInfo && b.volumeInfo.title) || '') || 999;
           return va - vb;
         });
+
       window._seriesVolsCache[seriesName] = booksVols;
     } catch(e) { booksVols = []; }
   }
