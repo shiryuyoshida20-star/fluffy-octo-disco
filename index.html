@@ -1190,21 +1190,18 @@ document.getElementById('titleSearchBtn').addEventListener('click', async () => 
   }
 
   try {
-    // 検索0: 楽天ブックス（APIキー設定時）
-    const rakutenAppId = localStorage.getItem('rakutenAppId');
-    if (rakutenAppId) {
-      resultsEl.innerHTML = `<p style="font-size:12px;color:var(--ink-soft)">楽天ブックスで検索中…</p>`;
-      try {
-        const rakutenResults = await searchRakutenBooks(query);
-        if (rakutenResults && rakutenResults.length) {
-          window._titleSearchData = rakutenResults;
-          window._titleSearchSource = 'rakuten';
-          resultsEl.innerHTML = '';
-          renderRakutenResults(rakutenResults, resultsEl);
-          return;
-        }
-      } catch(e) { console.warn('Rakuten:', e); }
-    }
+    // 検索0: 楽天ブックス（常に試みる）
+    resultsEl.innerHTML = `<p style="font-size:12px;color:var(--ink-soft)">楽天ブックスで検索中…</p>`;
+    try {
+      const rakutenResults = await searchRakutenBooks(query);
+      if (rakutenResults && rakutenResults.length) {
+        window._titleSearchData = rakutenResults;
+        window._titleSearchSource = 'rakuten';
+        resultsEl.innerHTML = '';
+        renderRakutenResults(rakutenResults, resultsEl);
+        return;
+      }
+    } catch(e) { console.warn('Rakuten:', e); }
 
     // 検索1: Google Books（日本語）
     let items = [];
@@ -1487,8 +1484,10 @@ document.getElementById('settingsSaveBtn').addEventListener('click', () => {
 });
 
 /* ---------------- 楽天ブックス検索 ---------------- */
+const RAKUTEN_APP_ID_DEFAULT = '126939cf-e10c-4517-be25-afb45d856a8a';
+
 async function searchRakutenBooks(query) {
-  const appId = localStorage.getItem('rakutenAppId');
+  const appId = localStorage.getItem('rakutenAppId') || RAKUTEN_APP_ID_DEFAULT;
   if (!appId) return null;
   try {
     // まずコミックジャンルで検索
@@ -1497,14 +1496,17 @@ async function searchRakutenBooks(query) {
     if (!res.ok) return null;
     const data = await res.json();
     if (!data.error && data.Items && data.Items.length) {
-      return data.Items.map(item => ({
-        title: item.title || '',
-        author: item.author || '',
-        publisher: item.publisherName || '',
-        date: item.salesDate || '',
-        isbn: item.isbn || '',
-        cover: item.largeImageUrl || item.mediumImageUrl || ''
-      }));
+      return data.Items.map(wrapper => {
+        const item = wrapper.Item || wrapper;
+        return {
+          title: item.title || '',
+          author: item.author || '',
+          publisher: item.publisherName || '',
+          date: item.salesDate || '',
+          isbn: item.isbn || '',
+          cover: item.largeImageUrl || item.mediumImageUrl || ''
+        };
+      });
     }
     // ジャンル絞りなしで再検索
     const url2 = `https://app.rakuten.co.jp/services/api/BooksBook/Search/20170404?applicationId=${encodeURIComponent(appId)}&title=${encodeURIComponent(query)}&hits=20&format=json`;
@@ -1512,14 +1514,17 @@ async function searchRakutenBooks(query) {
     if (!res2.ok) return null;
     const data2 = await res2.json();
     if (!data2.error && data2.Items && data2.Items.length) {
-      return data2.Items.map(item => ({
-        title: item.title || '',
-        author: item.author || '',
-        publisher: item.publisherName || '',
-        date: item.salesDate || '',
-        isbn: item.isbn || '',
-        cover: item.largeImageUrl || item.mediumImageUrl || ''
-      }));
+      return data2.Items.map(wrapper => {
+        const item = wrapper.Item || wrapper;
+        return {
+          title: item.title || '',
+          author: item.author || '',
+          publisher: item.publisherName || '',
+          date: item.salesDate || '',
+          isbn: item.isbn || '',
+          cover: item.largeImageUrl || item.mediumImageUrl || ''
+        };
+      });
     }
     return null;
   } catch(e) {
